@@ -55,7 +55,7 @@ export default function LandingClient() {
               {/* Buttons */}
               <div className="flex flex-col gap-3 w-3/4 sm:w-100">
                 <a
-                  href="https://x.com/"
+                  href="https://x.com/radarpoly"
                   target="_blank"
                   rel="noreferrer"
                   className={[
@@ -76,7 +76,8 @@ export default function LandingClient() {
                 </a>
 
                 <a
-                  href="#"
+                  href="https://t.me/polyradarbeta_bot"
+                  target="_blank"
                   className={[
                     "intro-step",
                     "inline-flex items-center justify-center rounded-2xl px-6 py-3 text-base font-semibold",

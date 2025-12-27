@@ -95,7 +95,7 @@ function toTradeUI(t: BackendTrade): TradeUI | null {
 
   const wallet = (t.proxyWallet ?? "").trim();
   const traderName = wallet ? shortAddr(wallet) : "unknown";
-  const traderUrl = wallet ? `https://polymarket.com/profile/${wallet}` : `https://polymarket.com/`;
+  const traderUrl = wallet ? `https://polymarket.com/profile/${wallet}?tab=activity&via=radar` : `https://polymarket.com/@Alexparker?tab=activity&via=radar`;
 
   const market = t.outcome ? `${title} • ${t.outcome}` : title;
   const usd = calcUsdFromBackend(t);
@@ -373,9 +373,9 @@ export default function WhaleSystem() {
   return (
     <>
       {/* dev: индикатор SSE */}
-      <div className="fixed top-6 left-6 z-[90] rounded-2xl px-3 py-2 text-xs font-semibold bg-white/15 border border-white/20 backdrop-blur">
+      {/* <div className="fixed top-6 left-6 z-[90] rounded-2xl px-3 py-2 text-xs font-semibold bg-white/15 border border-white/20 backdrop-blur">
         SSE: {sseConnected ? "connected" : "reconnecting…"}
-      </div>
+      </div> */}
 
       <div className="absolute inset-0 pointer-events-none">
         {whales.map((whale) => {
