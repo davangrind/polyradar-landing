@@ -57,6 +57,7 @@ type WhaleInstance = {
   dir: -1 | 1;
   trade: TradeUI;
   spawnedAtMs: number;
+  isLoading?: boolean;
 };
 
 function uid() {
@@ -95,7 +96,9 @@ function toTradeUI(t: BackendTrade): TradeUI | null {
 
   const wallet = (t.proxyWallet ?? "").trim();
   const traderName = wallet ? shortAddr(wallet) : "unknown";
-  const traderUrl = wallet ? `https://polymarket.com/profile/${wallet}?tab=activity&via=radar` : `https://polymarket.com/@Alexparker?tab=activity&via=radar`;
+  const traderUrl = wallet
+    ? `https://polymarket.com/profile/${wallet}?tab=activity&via=radar`
+    : `https://polymarket.com/@Alexparker?tab=activity&via=radar`;
 
   const market = t.outcome ? `${title} • ${t.outcome}` : title;
   const usd = calcUsdFromBackend(t);
@@ -154,9 +157,16 @@ export default function WhaleSystem() {
   const followRefs = useRef(new Map<string, HTMLDivElement>());
   const rafId = useRef<number | null>(null);
 
+  const LOADING_ID = "loading_whale";
+
+  const removeWhaleById = useCallback((id: string) => {
+    setWhales((prev) => prev.filter((x) => x.id !== id));
+    followRefs.current.delete(id);
+  }, []);
+
   /** Спавн кита из конкретной сделки */
   const spawnWhaleFromTrade = useCallback(
-    (trade: TradeUI) => {
+    (trade: TradeUI, opts?: { id?: string; isLoading?: boolean; durationSec?: number }) => {
       const w = window.innerWidth;
       const h = window.innerHeight;
 
@@ -179,11 +189,12 @@ export default function WhaleSystem() {
       const dir: -1 | 1 = Math.random() < 0.5 ? -1 : 1;
       const driftX = dir === 1 ? w - left + 320 : -(left + 320);
 
-      const duration = 15 + Math.random() * 3;
+      // для лоадера ставим подольше, чтобы он успел "дождаться" сделки
+      const duration = opts?.durationSec ?? (15 + Math.random() * 3);
       const bobDelay = duration * 0.25;
 
       const instance: WhaleInstance = {
-        id: uid(),
+        id: opts?.id ?? uid(),
         layer,
         leftPx: left,
         zIndex: waveZ[layer] - 1,
@@ -194,19 +205,72 @@ export default function WhaleSystem() {
         dir,
         trade,
         spawnedAtMs: performance.now(),
+        isLoading: opts?.isLoading,
       };
 
-      setWhales((prev) => [...prev, instance]);
+      setWhales((prev) => {
+        // не дублим loading whale
+        if (instance.id === LOADING_ID && prev.some((p) => p.id === LOADING_ID)) return prev;
+        return [...prev, instance];
+      });
 
       const t = window.setTimeout(() => {
-        setWhales((prev) => prev.filter((x) => x.id !== instance.id));
-        followRefs.current.delete(instance.id);
+        removeWhaleById(instance.id);
       }, Math.ceil((duration + 0.4) * 1000));
 
       timers.current.push(t);
     },
-    [isMobile, waveHeights, waveZ]
+    [isMobile, waveHeights, waveZ, removeWhaleById]
   );
+
+  /** Показать стартового "лоадер-кита" */
+  const spawnLoadingWhale = useCallback(() => {
+    const loadingTrade: TradeUI = {
+      traderName: "",
+      traderUrl: "#",
+      market: "",
+      side: "BUY",
+      sizeUsd: 0,
+      ts: Date.now(),
+      txHash: "loading",
+    };
+
+    // Делаем его чуть длиннее, чтобы почти всегда успел дождаться первого trade
+    spawnWhaleFromTrade(loadingTrade, { id: LOADING_ID, isLoading: true, durationSec: 18 });
+  }, [spawnWhaleFromTrade]);
+
+  /** "Апгрейд" лоадер-кита в настоящего: меняем только содержимое, не удаляем */
+  const upgradeLoadingWhale = useCallback((trade: TradeUI) => {
+    setWhales((prev) =>
+      prev.map((w) => {
+        if (w.id !== LOADING_ID) return w;
+        return {
+          ...w,
+          trade,
+          isLoading: false,
+        };
+      })
+    );
+  }, []);
+
+  const hasRealTradeRef = useRef(false);
+  const loadingTimerRef = useRef<number | null>(null);
+
+  // Ставим лоадер почти сразу после захода
+  useEffect(() => {
+    hasRealTradeRef.current = false;
+
+    loadingTimerRef.current = window.setTimeout(() => {
+      if (!hasRealTradeRef.current) spawnLoadingWhale();
+    }, 120);
+
+    return () => {
+      if (loadingTimerRef.current) {
+        window.clearTimeout(loadingTimerRef.current);
+        loadingTimerRef.current = null;
+      }
+    };
+  }, [spawnLoadingWhale]);
 
   /**
    * SSE: слушаем backend /sse и на каждое событие trade — спавним кита.
@@ -236,7 +300,6 @@ export default function WhaleSystem() {
       cleanup();
       setSseConnected(false);
 
-      // небольшой jitter + экспоненциальный backoff
       const jitter = Math.floor(Math.random() * 300);
       const delay = Math.min(8000, backoffMs) + jitter;
 
@@ -248,7 +311,6 @@ export default function WhaleSystem() {
     };
 
     const dedupKey = (t: TradeUI) => {
-      // ключ, чтобы не спавнить одно и то же подряд
       if (t.txHash) return t.txHash;
       return `${t.ts}:${t.traderUrl}:${t.market}:${t.side}:${t.sizeUsd}`;
     };
@@ -259,7 +321,6 @@ export default function WhaleSystem() {
       try {
         es = new EventSource(sseUrl);
 
-        // FastAPI отправляет event: hello
         es.addEventListener("hello", () => {
           backoffMs = 500;
           setSseConnected(true);
@@ -281,19 +342,29 @@ export default function WhaleSystem() {
               if (old) seenSetRef.current.delete(old);
             }
 
+            // Первый реальный trade: вместо удаления лоадера — апгрейдим его карточку
+            if (!hasRealTradeRef.current) {
+              hasRealTradeRef.current = true;
+              if (loadingTimerRef.current) {
+                window.clearTimeout(loadingTimerRef.current);
+                loadingTimerRef.current = null;
+              }
+              upgradeLoadingWhale(ui);
+              return; // важно: в первый раз НЕ спавним новый кит, а обновляем первого
+            }
+
+            // дальше как обычно — спавним новые киты
             spawnWhaleFromTrade(ui);
           } catch {
             // ignore bad payload
           }
         });
 
-        // heartbeat можно игнорировать, но полезно держать соединение "живым"
         es.addEventListener("heartbeat", () => {
           // noop
         });
 
         es.onerror = () => {
-          // Обычно EventSource сам переподключается, но мы делаем контролируемо
           scheduleReconnect();
         };
       } catch {
@@ -308,7 +379,7 @@ export default function WhaleSystem() {
       cleanup();
       setSseConnected(false);
     };
-  }, [spawnWhaleFromTrade]);
+  }, [spawnWhaleFromTrade, upgradeLoadingWhale]);
 
   /** cleanup */
   useEffect(() => {
@@ -372,11 +443,6 @@ export default function WhaleSystem() {
 
   return (
     <>
-      {/* dev: индикатор SSE */}
-      {/* <div className="fixed top-6 left-6 z-[90] rounded-2xl px-3 py-2 text-xs font-semibold bg-white/15 border border-white/20 backdrop-blur">
-        SSE: {sseConnected ? "connected" : "reconnecting…"}
-      </div> */}
-
       <div className="absolute inset-0 pointer-events-none">
         {whales.map((whale) => {
           const cardDelaySec = whale.durationSec * 0.22;
@@ -390,6 +456,7 @@ export default function WhaleSystem() {
           const whaleH = isMobile ? 40 : 70;
 
           const expandedAlways = isMobile;
+          const isLoading = !!whale.isLoading;
 
           return (
             <div
@@ -419,50 +486,79 @@ export default function WhaleSystem() {
                   >
                     <div className="group pointer-events-auto relative flex flex-col items-center gap-2">
                       {/* CARD */}
-                      <a
-                        href={whale.trade.traderUrl}
-                        target="_blank"
-                        rel="noreferrer"
-                        className={[
-                          "trade-card",
-                          "rounded-2xl bg-white/90 text-black backdrop-blur",
-                          "border border-black/10",
-                          "px-4 py-3",
-                          "shadow-[0_18px_40px_rgba(0,0,0,0.18)]",
-                          "transition-[box-shadow,transform] duration-300",
-                          isMobile ? "w-[240px]" : "w-[260px]",
-                          "group-hover:shadow-[0_18px_40px_rgba(0,0,0,0.18),0_0_0_1px_rgba(255,215,0,0.28),0_25px_80px_rgba(255,215,0,0.22)]",
-                          "active:scale-[0.99]",
-                        ].join(" ")}
-                        style={{ animationDelay: `${cardDelaySec}s` }}
-                      >
-                        <div className="flex items-center justify-between gap-3">
-                          <div className={`text-xs font-extrabold px-2 py-1 rounded-full ${sidePill}`}>
-                            {whale.trade.side}
-                          </div>
-                          <div className="text-sm font-extrabold">${whale.trade.sizeUsd.toLocaleString()}</div>
-                        </div>
-
+                      {isLoading ? (
                         <div
                           className={[
-                            "overflow-hidden transition-[max-height,opacity] duration-300",
-                            expandedAlways
-                              ? "max-h-[220px] opacity-100"
-                              : "max-h-0 opacity-0 group-hover:max-h-[220px] group-hover:opacity-100",
+                            "trade-card",
+                            "rounded-2xl bg-white/90 text-black backdrop-blur",
+                            "border border-black/10",
+                            "px-4 py-3",
+                            "shadow-[0_18px_40px_rgba(0,0,0,0.18)]",
+                            isMobile ? "w-[240px]" : "w-[260px]",
                           ].join(" ")}
+                          style={{ animationDelay: `${cardDelaySec}s` }}
                         >
-                          <div className="mt-3">
-                            <div className="text-xs font-semibold text-black/60">Trader</div>
-                            <div className="text-sm font-extrabold leading-tight">@{whale.trade.traderName}</div>
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="text-xs font-extrabold px-2 py-1 rounded-full bg-black/5 text-black/60">
+                              Loading
+                            </div>
+                            <div className="text-sm font-extrabold text-black/50">—</div>
                           </div>
 
-                          <div className="mt-2 text-xs text-black/70">{whale.trade.market}</div>
-
-                          <div className="mt-2 text-[11px] text-black/45">
-                            {isMobile ? "Tap to open trader profile →" : "Click to open trader profile →"}
+                          <div className="mt-3">
+                            <div className="text-xs font-semibold text-black/60">Fetching latest whales…</div>
+                            <div className="mt-2 flex items-center gap-2">
+                              <span className="inline-block h-3 w-3 rounded-full border-2 border-black/25 border-t-black/70 animate-spin" />
+                              <span className="text-xs text-black/45">Connecting to live feed</span>
+                            </div>
                           </div>
                         </div>
-                      </a>
+                      ) : (
+                        <a
+                          href={whale.trade.traderUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className={[
+                            "trade-card",
+                            "rounded-2xl bg-white/90 text-black backdrop-blur",
+                            "border border-black/10",
+                            "px-4 py-3",
+                            "shadow-[0_18px_40px_rgba(0,0,0,0.18)]",
+                            "transition-[box-shadow,transform] duration-300",
+                            isMobile ? "w-[240px]" : "w-[260px]",
+                            "group-hover:shadow-[0_18px_40px_rgba(0,0,0,0.18),0_0_0_1px_rgba(255,215,0,0.28),0_25px_80px_rgba(255,215,0,0.22)]",
+                            "active:scale-[0.99]",
+                          ].join(" ")}
+                          style={{ animationDelay: `${cardDelaySec}s` }}
+                        >
+                          <div className="flex items-center justify-between gap-3">
+                            <div className={`text-xs font-extrabold px-2 py-1 rounded-full ${sidePill}`}>
+                              {whale.trade.side}
+                            </div>
+                            <div className="text-sm font-extrabold">${whale.trade.sizeUsd.toLocaleString()}</div>
+                          </div>
+
+                          <div
+                            className={[
+                              "overflow-hidden transition-[max-height,opacity] duration-300",
+                              expandedAlways
+                                ? "max-h-[220px] opacity-100"
+                                : "max-h-0 opacity-0 group-hover:max-h-[220px] group-hover:opacity-100",
+                            ].join(" ")}
+                          >
+                            <div className="mt-3">
+                              <div className="text-xs font-semibold text-black/60">Trader</div>
+                              <div className="text-sm font-extrabold leading-tight">@{whale.trade.traderName}</div>
+                            </div>
+
+                            <div className="mt-2 text-xs text-black/70">{whale.trade.market}</div>
+
+                            <div className="mt-2 text-[11px] text-black/45">
+                              {isMobile ? "Tap to open trader profile →" : "Click to open trader profile →"}
+                            </div>
+                          </div>
+                        </a>
+                      )}
 
                       {/* WHALE + GLOW */}
                       <div className="relative">
