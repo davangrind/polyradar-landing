@@ -97,8 +97,8 @@ function toTradeUI(t: BackendTrade): TradeUI | null {
   const wallet = (t.proxyWallet ?? "").trim();
   const traderName = wallet ? shortAddr(wallet) : "unknown";
   const traderUrl = wallet
-    ? `https://polymarket.com/profile/${wallet}?tab=activity&via=radar`
-    : `https://polymarket.com/@Alexparker?tab=activity&via=radar`;
+    ? `https://polymarket.com/profile/${wallet}?tab=activity&via=inside`
+    : `https://polymarket.com/@Alexparker?tab=activity&via=inside`;
 
   const market = t.outcome ? `${title} • ${t.outcome}` : title;
   const usd = calcUsdFromBackend(t);
